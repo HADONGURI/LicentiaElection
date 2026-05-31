@@ -6487,5 +6487,355 @@ renderRegiaList();
 buildLegend();
 initFbListeners(); // Firebase 리스너 시작
 </script>
+
+<script id="licentia-patch">
+// ============================================================
+// 리센티아 선거 개표 현황 - 기능 패치 v2
+// Features: 정보 우선 표시, 편집 모드 분리, 새 프리셋 시스템,
+//           하원 편집 모드, 모바일 최적화, 결과 저장
+// ============================================================
+
+// 정당 정보
+window.PARTIES = [
+  {id:'lib', name:'자유당',        sname:'자유', color:'#0070C0'},
+  {id:'dem', name:'민주당',        sname:'민주', color:'#C00000'},
+  {id:'grn', name:'녹색당',        sname:'녹색', color:'#00A040'},
+  {id:'lag', name:'라그리앙시민당', sname:'시민', color:'#C8A000'},
+  {id:'soc', name:'사회당',        sname:'사회', color:'#E05000'},
+];
+
+// 프리셋 데이터 (자유당/민주당 승리 시나리오 스펙트럼)
+window.PRESET_DATA = {
+  'lib_압승':  {lib:0.65, dem:0.30, grn:0.03, lag:0.01, soc:0.01, turnout:0.72},
+  'lib_중승':  {lib:0.58, dem:0.37, grn:0.03, lag:0.01, soc:0.01, turnout:0.70},
+  'lib_신승':  {lib:0.52, dem:0.44, grn:0.02, lag:0.01, soc:0.01, turnout:0.68},
+  'close_lib': {lib:0.502,dem:0.488,grn:0.007,lag:0.002,soc:0.001,turnout:0.68},
+  'close_dem': {lib:0.488,dem:0.502,grn:0.007,lag:0.002,soc:0.001,turnout:0.68},
+  'dem_신승':  {lib:0.44, dem:0.52, grn:0.02, lag:0.01, soc:0.01, turnout:0.68},
+  'dem_중승':  {lib:0.37, dem:0.58, grn:0.03, lag:0.01, soc:0.01, turnout:0.70},
+  'dem_압승':  {lib:0.30, dem:0.65, grn:0.03, lag:0.01, soc:0.01, turnout:0.72},
+};
+
+// mToA 오버라이드 (색상 채도 향상)
+window._origMtoA = window.mToA;
+window.mToA = function(r1,g1,b1,r2,g2,b2,t,base){
+  const minAlpha = 0.18;
+  const result = window._origMtoA ? window._origMtoA(r1,g1,b1,r2,g2,b2,t,base) : null;
+  if(!result) return `rgba(${r1},${g1},${b1},${Math.max(minAlpha, t)})`;
+  // alpha 값 추출 후 최소값 보장
+  return result.replace(/rgba\((\d+),(\d+),(\d+),([\d.]+)\)/, (m,r,g,b,a) =>
+    `rgba(${r},${g},${b},${Math.max(minAlpha, parseFloat(a))})`
+  );
+};
+
+// 현재 선거 모드 감지
+window.getElMode = function(){
+  const t = document.querySelector('.el-tab.on')?.textContent?.trim()||'';
+  if(t.includes('하원')) return 'assembly';
+  if(t.includes('지방')) return 'local';
+  return 'pres';
+};
+
+// UI 갱신 함수
+window.refreshEditUI = function(no){
+  window.PARTIES.forEach(p=>{
+    const sl=document.getElementById('sl-'+no+'-'+p.id);
+    const ni=document.getElementById('ni-'+no+'-'+p.id);
+    if(sl&&ni) ni.value=sl.value;
+  });
+  const ts=document.getElementById('to-sl-'+no), tn=document.getElementById('to-ni-'+no);
+  if(ts&&tn) tn.value=ts.value;
+};
+
+// 팔레트 시각화 업데이트
+window.updatePaletteViz = function(no){
+  const viz=document.getElementById('palette-viz-'+no);
+  if(!viz) return;
+  const c=window.curData()[no]; if(!c) return;
+  const PC={'lib':'#0070C0','dem':'#C00000','grn':'#00A040','lag':'#C8A000','soc':'#E05000'};
+  const pids=['lib','dem','grn','lag','soc'];
+  let vals={}, total=0;
+  pids.forEach(pid=>{ const sl=document.getElementById('sl-'+no+'-'+pid); vals[pid]=sl?Math.max(0,parseFloat(sl.value)||0):0; total+=vals[pid]; });
+  if(total>0) pids.forEach(pid=>vals[pid]=vals[pid]/total*100);
+  let html='<div style="display:flex;height:28px;border-radius:6px;overflow:hidden;margin-bottom:6px;border:1px solid #ddd;">';
+  pids.forEach(pid=>{ if(vals[pid]<0.5) return; const col=PC[pid]||'#888'; const pn=window.PARTIES.find(p=>p.id===pid)?.sname||pid;
+    html+=`<div title="${pn} ${vals[pid].toFixed(1)}%" style="flex:${vals[pid]};background:${col};display:flex;align-items:center;justify-content:center;">`;
+    if(vals[pid]>7) html+=`<span style="color:#fff;font-size:10px;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.4);">${vals[pid].toFixed(1)}%</span>`;
+    html+='</div>';
+  });
+  html+='</div><div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px;">';
+  pids.forEach(pid=>{ const sl=document.getElementById('sl-'+no+'-'+pid); if(!sl||vals[pid]<0.1) return;
+    const col=PC[pid]||'#888'; const pn=window.PARTIES.find(p=>p.id===pid)?.name||pid;
+    html+=`<span style="display:flex;align-items:center;gap:3px;"><span style="width:9px;height:9px;border-radius:50%;background:${col};display:inline-block;flex-shrink:0;"></span><span style="color:#333;">${pn} ${vals[pid].toFixed(1)}%</span></span>`;
+  });
+  html+='</div>'; viz.innerHTML=html;
+  const ts=document.getElementById('to-sl-'+no), te=document.getElementById('to-total-'+no);
+  if(ts&&te&&c.voters) te.textContent=Math.round(c.voters*(parseFloat(ts.value)||0)/100).toLocaleString();
+};
+
+// 프리셋 적용
+window.applyPreset = function(no, preset){
+  const c=window.curData()[no]; if(!c) return;
+  const p=window.PRESET_DATA[preset]; if(!p) return;
+  const nominated=c.nominated||{};
+  const pids=['lib','dem','grn','lag','soc'];
+  let totalRaw=0; pids.forEach(pid=>{ if(nominated[pid]) totalRaw+=(p[pid]||0); });
+  pids.forEach(pid=>{
+    const sl=document.getElementById('sl-'+no+'-'+pid), ni=document.getElementById('ni-'+no+'-'+pid);
+    if(!nominated[pid]){ if(sl) sl.value=0; if(ni) ni.value=0; return; }
+    const val=parseFloat((totalRaw>0?(p[pid]||0)/totalRaw*100:0).toFixed(2));
+    if(sl) sl.value=val; if(ni) ni.value=val;
+  });
+  const ts=document.getElementById('to-sl-'+no), tn=document.getElementById('to-ni-'+no);
+  const tv=Math.round((p.turnout||0.70)*100); if(ts) ts.value=tv; if(tn) tn.value=tv;
+  window.refreshEditUI(no); window.updatePaletteViz(no);
+};
+
+// 공천 변경
+window.onNomChange = function(no,pid,checked){
+  const sl=document.getElementById('sl-'+no+'-'+pid), ni=document.getElementById('ni-'+no+'-'+pid);
+  if(sl){sl.disabled=!checked; sl.style.opacity=checked?'1':'0.4';}
+  if(ni){ni.disabled=!checked; ni.style.opacity=checked?'1':'0.4';}
+  if(!checked){if(sl) sl.value=0; if(ni) ni.value='0.00';}
+  window.updatePaletteViz(no);
+};
+
+// 지도에 반영
+window.autoCalcFromPalette = function(no){
+  const d=window.curData(), c=d[no]; if(!c){alert('데이터 없음'); return;}
+  const pids=['lib','dem','grn','lag','soc'];
+  let vals={}, total=0;
+  pids.forEach(pid=>{ const sl=document.getElementById('sl-'+no+'-'+pid); vals[pid]=sl?Math.max(0,parseFloat(sl.value)||0):0; total+=vals[pid]; });
+  pids.forEach(pid=>{ c[pid]=total>0?vals[pid]/total:0; });
+  const ts=document.getElementById('to-sl-'+no);
+  if(ts&&c.voters){ c.turnout=Math.max(0,Math.min(1,(parseFloat(ts.value)||0)/100)); c.total_votes=Math.round(c.voters*c.turnout); }
+  pids.forEach(pid=>{ const cb=document.getElementById('nom-'+no+'-'+pid); if(cb){if(!c.nominated) c.nominated={}; c.nominated[pid]=cb.checked;} });
+  try{ window.applyEdit(no); }catch(e){ console.error('applyEdit error:',e); }
+  window.updatePaletteViz(no);
+};
+
+// 편집 패널 생성
+window.buildEditModePanel = function(no){
+  const c=window.curData()[no]; if(!c) return null;
+  const nominated=c.nominated||{};
+  const PC={'lib':'#0070C0','dem':'#C00000','grn':'#00A040','lag':'#C8A000','soc':'#E05000'};
+  const pids=['lib','dem','grn','lag','soc'];
+  const panel=document.createElement('div');
+  panel.id='edit-mode-panel-'+no; panel.style.cssText='margin-top:8px;';
+  // 팔레트 viz
+  const viz=document.createElement('div'); viz.id='palette-viz-'+no; viz.style.cssText='margin:0 0 10px 0;'; panel.appendChild(viz);
+  // 프리셋 카드
+  const pc=document.createElement('div'); pc.className='card'; pc.style.cssText='margin-bottom:10px;padding:12px;';
+  pc.innerHTML=`<div style="font-weight:700;font-size:13px;margin-bottom:8px;">🎯 시나리오 프리셋</div>
+    <div style="font-size:11px;color:#666;margin-bottom:10px;">자유당 ← 중립 → 민주당</div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:6px;">
+      <button onclick="window.applyPreset(${no},'lib_압승')" style="background:#e8f0f8;border:1.5px solid #0070C0;color:#0047a0;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;font-weight:600;">자유 압승<br><span style="font-size:10px;font-weight:400;">65%</span></button>
+      <button onclick="window.applyPreset(${no},'lib_중승')" style="background:#eef4fb;border:1.5px solid #4499cc;color:#0060aa;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">자유 중승<br><span style="font-size:10px;color:#555;">58%</span></button>
+      <button onclick="window.applyPreset(${no},'lib_신승')" style="background:#f4f8fd;border:1.5px solid #88aacc;color:#336699;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">자유 신승<br><span style="font-size:10px;color:#555;">52%</span></button>
+      <button onclick="window.applyPreset(${no},'close_lib')" style="background:#f8f4f8;border:1.5px solid #888;color:#444;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">초접전<br><span style="font-size:10px;color:#555;">자유 우세</span></button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;">
+      <button onclick="window.applyPreset(${no},'close_dem')" style="background:#f8f4f4;border:1.5px solid #888;color:#444;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">초접전<br><span style="font-size:10px;color:#555;">민주 우세</span></button>
+      <button onclick="window.applyPreset(${no},'dem_신승')" style="background:#fdf4f4;border:1.5px solid #cc8888;color:#993333;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">민주 신승<br><span style="font-size:10px;color:#555;">52%</span></button>
+      <button onclick="window.applyPreset(${no},'dem_중승')" style="background:#fbeaea;border:1.5px solid #cc4444;color:#aa2222;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;">민주 중승<br><span style="font-size:10px;color:#555;">58%</span></button>
+      <button onclick="window.applyPreset(${no},'dem_압승')" style="background:#f8e0e0;border:1.5px solid #C00000;color:#990000;font-size:11px;padding:6px 2px;border-radius:5px;cursor:pointer;font-weight:600;">민주 압승<br><span style="font-size:10px;font-weight:400;">65%</span></button>
+    </div>`; panel.appendChild(pc);
+  // 투표율 카드
+  const tc=document.createElement('div'); tc.className='card'; tc.style.cssText='margin-bottom:10px;padding:12px;';
+  const currTO=Math.round((c.turnout||0.7)*100);
+  tc.innerHTML=`<div style="font-weight:700;font-size:13px;margin-bottom:8px;">⚙ 투표율 조정</div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:12px;">투표율</span>
+      <input type="range" id="to-sl-${no}" min="0" max="100" step="0.1" value="${currTO}" style="flex:1;" oninput="document.getElementById('to-ni-${no}').value=this.value;window.updatePaletteViz(${no})">
+      <input type="number" id="to-ni-${no}" min="0" max="100" step="0.1" value="${currTO}" style="width:58px;" oninput="document.getElementById('to-sl-${no}').value=this.value;window.updatePaletteViz(${no})">
+      <span style="font-size:12px;">%</span>
+    </div>
+    <div style="font-size:11px;color:#666;margin-top:4px;">총 투표수: <span id="to-total-${no}">${(c.total_votes||0).toLocaleString()}</span></div>`; panel.appendChild(tc);
+  // 득표율 카드
+  const vc=document.createElement('div'); vc.className='card'; vc.style.cssText='margin-bottom:10px;padding:12px;';
+  let vh='<div style="font-weight:700;font-size:13px;margin-bottom:10px;">🗳 정당별 득표율</div>';
+  pids.forEach(pid=>{
+    const party=window.PARTIES.find(p=>p.id===pid); if(!party) return;
+    const nomChecked=nominated[pid]?'checked':'';
+    const currVal=nominated[pid]?((c[pid]||0)*100).toFixed(2):'0.00';
+    const col=PC[pid];
+    vh+=`<div style="margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+        <span style="width:10px;height:10px;border-radius:50%;background:${col};display:inline-block;flex-shrink:0;"></span>
+        <span style="font-size:12px;font-weight:600;">${party.name}</span>
+        <label style="font-size:11px;color:#666;margin-left:auto;cursor:pointer;">공천 <input type="checkbox" ${nomChecked} id="nom-${no}-${pid}" onchange="window.onNomChange(${no},'${pid}',this.checked)"></label>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="range" id="sl-${no}-${pid}" min="0" max="100" step="0.1" value="${currVal}" ${!nominated[pid]?'disabled style="opacity:0.4;"':''} oninput="document.getElementById('ni-${no}-${pid}').value=parseFloat(this.value).toFixed(2);window.updatePaletteViz(${no})">
+        <input type="number" id="ni-${no}-${pid}" min="0" max="100" step="0.1" value="${currVal}" ${!nominated[pid]?'disabled style="opacity:0.4;"':''} style="width:62px;" oninput="document.getElementById('sl-${no}-${pid}').value=this.value;window.updatePaletteViz(${no})">
+        <span style="font-size:12px;">%</span>
+      </div>
+    </div>`;
+  });
+  vc.innerHTML=vh; panel.appendChild(vc);
+  // 적용 버튼
+  const ab=document.createElement('button'); ab.textContent='✓ 지도에 반영'; ab.onclick=function(){ window.autoCalcFromPalette(no); };
+  ab.style.cssText='width:100%;padding:12px;background:#2d8a4e;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;'; panel.appendChild(ab);
+  return panel;
+};
+
+// 편집 모드 토글
+window.toggleEditMode = function(no){
+  let panel=document.getElementById('edit-mode-panel-'+no);
+  if(!panel){
+    panel=window.buildEditModePanel(no); if(!panel) return;
+    panel.style.display='none';
+    const detail=document.getElementById('stc-detail'); if(detail) detail.appendChild(panel);
+    panel.style.display=''; window.updatePaletteViz(no);
+    const btn=document.getElementById('edit-toggle-'+no); if(btn) btn.textContent='🔼 편집 모드 닫기';
+    setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'nearest'}),100);
+    return;
+  }
+  const isHidden=panel.style.display==='none';
+  panel.style.display=isHidden?'':'none';
+  const btn=document.getElementById('edit-toggle-'+no);
+  if(btn) btn.textContent=isHidden?'🔼 편집 모드 닫기':'✏️ 선거 편집 모드';
+  if(isHidden){ window.updatePaletteViz(no); setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'nearest'}),100); }
+};
+
+// renderCity - 모든 선거 모드 통합 (정보 우선 표시)
+const _RC_orig = window.renderCity;
+window.renderCity = function(no){
+  const elMode=window.getElMode();
+  const d=window.curData(), c=d[no]; if(!c){ _RC_orig&&_RC_orig.call(this,no); return; }
+  // stc-detail 탭 활성화
+  document.querySelectorAll('.stab').forEach(t=>t.classList.remove('on'));
+  document.querySelectorAll('#stab-contents > div').forEach(t=>t.classList.remove('on'));
+  document.querySelectorAll('.stab').forEach(t=>{ if(t.textContent.includes('편집')) t.classList.add('on'); });
+  const detail=document.getElementById('stc-detail'); if(detail) detail.classList.add('on');
+  if(!detail) return;
+  const PC={'lib':'#0070C0','dem':'#C00000','grn':'#00A040','lag':'#C8A000','soc':'#E05000'};
+  const PN={'lib':'자유당','dem':'민주당','grn':'녹색당','lag':'라그리앙시민당','soc':'사회당'};
+  const nominated=c.nominated||{}, pids=['lib','dem','grn','lag','soc'];
+  let winPid=null, winPct=0;
+  pids.forEach(pid=>{ if(nominated[pid]&&(c[pid]||0)>winPct){winPct=c[pid]; winPid=pid;} });
+  const winCol=winPid?(PC[winPid]||'#888'):'#888', winName=winPid?(PN[winPid]||winPid):'미개표';
+  const sorted=pids.filter(p=>nominated[p]).sort((a,b)=>(c[b]||0)-(c[a]||0));
+  const marginPct=sorted.length>=2?((c[sorted[0]]||0)-(c[sorted[1]]||0))*100:0;
+  let barHtml='';
+  if(pids.some(p=>nominated[p]&&(c[p]||0)>0)){
+    pids.forEach(pid=>{ if(!nominated[pid]||!(c[pid]>0)) return;
+      const pct=((c[pid]||0)*100).toFixed(2), votes=Math.round((c.total_votes||0)*(c[pid]||0));
+      barHtml+=`<div style="margin-bottom:8px;"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px;"><span style="font-weight:600;color:${PC[pid]||'#888'}">${PN[pid]||pid}</span><span>${votes.toLocaleString()}표 &nbsp;<strong>${pct}%</strong></span></div><div style="background:#eee;border-radius:3px;height:6px;"><div style="width:${pct}%;background:${PC[pid]||'#888'};height:6px;border-radius:3px;max-width:100%;"></div></div></div>`;
+    });
+    if(sorted.length>=2) barHtml+=`<div style="font-size:11px;color:#666;margin-top:6px;">1~2위 격차 <strong>${marginPct.toFixed(2)}%p</strong> · <strong>${Math.round(Math.abs((c[sorted[0]]||0)-(c[sorted[1]]||0))*(c.total_votes||0)).toLocaleString()}표</strong> 차이</div>`;
+  } else { barHtml='<div style="color:#999;font-size:13px;padding:8px 0;">미개표 / 공천 없음</div>'; }
+  let extraHtml='';
+  if(elMode!=='assembly'){
+    try{
+      const rAgg=typeof window.regiaAgg==='function'?window.regiaAgg(c.rno):null;
+      const sAgg=typeof window.stateAgg==='function'?window.stateAgg(c.state):null;
+      if(rAgg&&rAgg.winner){ const rM=((rAgg.margin||0)*100).toFixed(1), rC=PC[rAgg.winner.id]||'#888';
+        extraHtml+=`<div class="card" style="padding:12px 16px;margin-bottom:8px;"><div style="font-size:12px;color:#666;margin-bottom:4px;">🏛 레지아지사 (${c.regia})</div><div style="font-size:13px;font-weight:700;color:${rC};">● ${rAgg.winner.name} <span style="font-size:12px;font-weight:400;">격차 ${rM}%p</span></div><div style="font-size:11px;color:#999;margin-top:2px;">레지아 투표율 ${rAgg.total_votes&&rAgg.voters?((rAgg.total_votes/rAgg.voters)*100).toFixed(1):'?'}%</div></div>`; }
+      if(sAgg&&sAgg.winner){ const sM=((sAgg.margin||0)*100).toFixed(1), sC=PC[sAgg.winner.id]||'#888';
+        extraHtml+=`<div class="card" style="padding:12px 16px;margin-bottom:8px;"><div style="font-size:12px;color:#666;margin-bottom:4px;">🏢 주지사 (${c.state})</div><div style="font-size:13px;font-weight:700;color:${sC};">● ${sAgg.winner.name} <span style="font-size:12px;font-weight:400;">격차 ${sM}%p</span></div></div>`; }
+    }catch(e){}
+  }
+  const distLabel=elMode==='assembly'?`하원 제${no}선거구`:`${c.state} · ${c.regia} #${no}`;
+  detail.innerHTML=`
+    <div class="card" style="padding:14px 16px;margin-bottom:8px;">
+      <div style="font-size:20px;font-weight:800;margin-bottom:4px;">${c.name}</div>
+      <div style="font-size:12px;color:#888;margin-bottom:10px;">${distLabel}</div>
+      ${winPid?`<div style="font-size:14px;font-weight:700;color:${winCol};">● ${winName} <span style="font-size:12px;font-weight:400;">격차 ${marginPct.toFixed(2)}%p</span></div>`:'<div style="color:#999;font-size:13px;">공천 없음</div>'}
+    </div>
+    <div class="card" style="padding:12px 16px;margin-bottom:8px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div style="background:#f7f7f7;border-radius:6px;padding:8px;"><div style="font-size:11px;color:#888;">유권자</div><div style="font-size:15px;font-weight:700;">${(c.voters||0).toLocaleString()}</div></div>
+        <div style="background:#f7f7f7;border-radius:6px;padding:8px;"><div style="font-size:11px;color:#888;">총 투표수</div><div style="font-size:15px;font-weight:700;">${(c.total_votes||0).toLocaleString()}</div></div>
+        <div style="background:#f7f7f7;border-radius:6px;padding:8px;"><div style="font-size:11px;color:#888;">투표율</div><div style="font-size:15px;font-weight:700;">${((c.turnout||0)*100).toFixed(1)}%</div></div>
+        <div style="background:#f7f7f7;border-radius:6px;padding:8px;"><div style="font-size:11px;color:#888;">무효/기타</div><div style="font-size:15px;font-weight:700;">${((c.etc||0)*100).toFixed(1)}%</div></div>
+      </div>
+    </div>
+    <div class="card" style="padding:12px 16px;margin-bottom:8px;"><div style="font-size:13px;font-weight:700;margin-bottom:10px;">득표 현황</div>${barHtml}</div>
+    ${extraHtml}
+    <div style="margin-bottom:4px;"><button id="edit-toggle-${no}" onclick="window.toggleEditMode(${no})" style="width:100%;padding:13px;background:#1a5fa8;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;">✏️ 선거 편집 모드</button></div>`;
+  document.querySelectorAll('#layer-city path.sel,#layer-regia path.sel,#layer-assembly path.sel').forEach(p=>p.classList.remove('sel'));
+  const sp=document.querySelector(`#layer-city path[data-no="${no}"],#layer-regia path[data-no="${no}"],#layer-assembly path[data-no="${no}"]`);
+  if(sp) sp.classList.add('sel');
+};
+
+// 탭 전환 시 지도 즉시 업데이트 (Feature 5)
+setTimeout(()=>{
+  document.querySelectorAll('.el-tab').forEach(tab=>{
+    const newTab=tab.cloneNode(true);
+    tab.parentNode.replaceChild(newTab, tab);
+    newTab.addEventListener('click', ()=>{
+      setTimeout(()=>{
+        try{
+          const vMode=window.viewMode||'city';
+          if(vMode==='city'||vMode==='선거구') window.paintCity&&window.paintCity();
+          else window.paintRegia&&window.paintRegia();
+        }catch(e){}
+      }, 100);
+    });
+  });
+}, 500);
+
+// 모바일 최적화 CSS
+(function(){
+  const s=document.createElement('style');
+  s.id='licentia-mobile-css';
+  s.textContent=`
+    @media(max-width:768px){
+      #app{flex-direction:column!important;}
+      #map-wrap{height:55vh!important;min-height:300px;}
+      #side{width:100%!important;height:45vh!important;overflow-y:auto!important;border-top:2px solid var(--border);}
+      #hdr{padding:0 8px!important;gap:6px!important;}
+      .logo{font-size:15px!important;}
+      .el-tab{font-size:11px!important;padding:4px 8px!important;}
+      .stab{font-size:11px!important;padding:6px 8px!important;}
+    }
+    @media(max-width:480px){
+      #map-wrap{height:50vh!important;}
+      #side{height:50vh!important;}
+      .view-btn{font-size:10px!important;padding:3px 5px!important;}
+    }
+  `;
+  if(!document.getElementById('licentia-mobile-css')) document.head.appendChild(s);
+})();
+
+// MutationObserver - stc-detail 변화 감지 (원본 editCard 호환)
+(function(){
+  const detail=document.getElementById('stc-detail');
+  if(!detail||detail._patchObserver) return;
+  const obs=new MutationObserver(()=>{
+    // 원본 apply-btn에 onclick="applyEdit(no)" 형식이면 우리 버튼 추가
+    if(!detail.querySelector('.edit-mode-btn')&&detail.querySelector('.apply-btn')){
+      const applyBtn=detail.querySelector('.apply-btn');
+      const m=applyBtn?.getAttribute('onclick')?.match(/applyEdit\((\d+)\)/);
+      if(m){
+        const no=parseInt(m[1]);
+        const wrap=document.createElement('div');
+        wrap.innerHTML=`<button id="edit-toggle-${no}" class="edit-mode-btn" onclick="window.toggleEditMode(${no})" style="width:100%;padding:13px;background:#1a5fa8;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:8px;">✏️ 선거 편집 모드</button>`;
+        detail.insertBefore(wrap.firstChild, applyBtn);
+      }
+    }
+  });
+  obs.observe(detail,{childList:true,subtree:false});
+  detail._patchObserver=true;
+})();
+
+// 지도 클릭 인터셉트 (map-wrap capture)
+(function(){
+  const mw=document.getElementById('map-wrap');
+  if(!mw||mw._patchCapture) return;
+  mw.addEventListener('mouseup', function(e){
+    const path=e.target.closest('path[data-no]'); if(!path) return;
+    const no=parseInt(path.getAttribute('data-no')); if(!no) return;
+    setTimeout(()=>{
+      const detail=document.getElementById('stc-detail');
+      if(detail&&detail.classList.contains('on')&&!detail.querySelector('.edit-mode-btn')){
+        window.renderCity(no);
+      }
+    }, 80);
+  }, true);
+  mw._patchCapture=true;
+})();
+    </script>
 </body>
 </html>
